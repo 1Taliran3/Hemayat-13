@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">نشان حمایت ۱۳</title>
+  <desc id="desc">عدد ۱۳ به رنگ طلایی روی زمینه مشکی</desc>
+  <rect width="128" height="128" rx="28" fill="#080808"/>
+  <rect x="5" y="5" width="118" height="118" rx="24" fill="none" stroke="#D8B65A" stroke-opacity=".55" stroke-width="1.5"/>
+  <path d="M25 33h78M25 95h78" stroke="#D8B65A" stroke-opacity=".25" stroke-width="1"/>
+  <text x="64" y="82" text-anchor="middle" font-family="Arial, sans-serif" font-size="52" font-weight="800" letter-spacing="-3" fill="#F0D477">13</text>
+</svg>
