@@ -113,7 +113,7 @@ function Home() {
       </section>
 
       <section className="cta-section">
-        <div className="container cta"><div><span className="section-label"><i /> قدم بعدی</span><h2>از آشنایی تا همراهی،<br /><span className="text-gold">یک قدم فاصله است.</span></h2><p>با مسیر حمایت ۱۳ آشنا شو و نسخه آزمایشی را بررسی کن.</p></div><div className="cta-actions"><Link to="/donate" className="primary-button">دیدن روش‌های حمایت <span aria-hidden="true">↖</span></Link><Link to="/register" className="secondary-button">ساخت حساب نمایشی</Link></div></div>
+        <div className="container cta"><div><span className="section-label"><i /> قدم بعدی</span><h2>از آشنایی تا همراهی،<br /><span className="text-gold">یک قدم فاصله است.</span></h2><p>با مسیر حمایت ۱۳ آشنا شو و نسخه آزمایشی را بررسی کن.</p></div><div className="cta-actions"><Link to="/donate" className="primary-button">دیدن روش‌های حمایت <span aria-hidden="true">↖</span></Link><Link to="/register" className="secondary-button">ساخت حساب</Link></div></div>
       </section>
     </main>
   );

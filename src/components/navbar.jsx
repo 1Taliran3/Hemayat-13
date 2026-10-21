@@ -4,14 +4,15 @@ import { Link, useNavigate } from "react-router-dom";
 function Navbar() {
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
-  const isLoggedIn = localStorage.getItem("isLoggedIn") === "true";
+  const isLoggedIn = Boolean(localStorage.getItem("token"));
 
   const closeMenu = () => setMenuOpen(false);
   const handleLogout = () => {
+    localStorage.removeItem("token");
     localStorage.removeItem("isLoggedIn");
     localStorage.removeItem("user");
     closeMenu();
-    navigate("/");
+    navigate("/", { replace: true });
   };
 
   return (
