@@ -1,406 +1,487 @@
-import bcrypt from "bcryptjs";
-import cors from "cors";
+
 import "dotenv/config";
 import express from "express";
+import cors from "cors";
+import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import process from "node:process";
 import pg from "pg";
+import process from "node:process";
 
-const { Pool } = pg;
 const app = express();
-const port = Number(process.env.PORT) || 10000;
+const { Pool } = pg;
+
+const PORT = Number(process.env.PORT) || 10000;
 const JWT_SECRET = process.env.JWT_SECRET;
 
-if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET is missing from backend .env");
-}
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is missing from backend .env");
-}
-
-const allowedOrigins = new Set([
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  process.env.FRONTEND_ORIGIN,
-].filter(Boolean));
-
-app.use(cors({
-  origin(origin, callback) {
-    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
-    return callback(new Error("Origin is not allowed by CORS."));
-  },
-}));
-app.use(express.json({ limit: "20kb" }));
-
-const db = new Pool({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: {
+    rejectUnauthorized: false,
+  },
+  connectionTimeoutMillis: 10000,
 });
 
-db.on("error", (error) => {
-  console.error("Unexpected database error:", error.message);
+pool.on("error", (error) => {
+  console.error("Unexpected database pool error:", error.message);
 });
 
-function signToken(user) {
+// CORS: allow localhost, configured frontend, and Vercel deployments.
+const allowedOrigins = [
+  "http://localhost:5173",
+  ...(process.env.FRONTEND_ORIGIN || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+].map((origin) => {
+  try {
+    return new URL(origin).origin;
+  } catch {
+    return null;
+  }
+}).filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      let hostname;
+
+      try {
+        hostname = new URL(origin).hostname;
+      } catch {
+        return callback(new Error("Invalid request origin"));
+      }
+
+      const isVercel = hostname.endsWith(".vercel.app");
+      const isAllowed = allowedOrigins.includes(
+        new URL(origin).origin
+      );
+
+      if (isAllowed || isVercel) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("CORS blocked origin"));
+    },
+  })
+);
+
+app.use(express.json({ limit: "1mb" }));
+
+// Check required configuration without exposing secrets.
+async function queryDatabase(sql, params = []) {
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL is not configured");
+  }
+
+  return pool.query(sql, params);
+}
+
+function createToken(user) {
+  if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET is not configured");
+  }
+
   return jwt.sign(
-    { userId: String(user.id) },
+    {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+    },
     JWT_SECRET,
     { expiresIn: "7d" }
   );
 }
 
-/* اعتبارسنجی توکن و تازه‌خوانی نقش کاربر از دیتابیس */
-async function authenticateToken(req, res, next) {
+// Authentication middleware
+function authenticateToken(req, res, next) {
+  if (!JWT_SECRET) {
+    return res.status(500).json({
+      success: false,
+      message: "Server authentication is not configured",
+    });
+  }
+
   const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const token = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : null;
 
   if (!token) {
     return res.status(401).json({
       success: false,
-      message: "ابتدا وارد حساب کاربری شوید.",
+      message: "Authentication required",
     });
   }
 
-  let payload;
-  try {
-    payload = jwt.verify(token, JWT_SECRET);
-  } catch {
-    return res.status(401).json({
-      success: false,
-      message: "توکن ورود معتبر نیست یا منقضی شده است.",
-    });
-  }
-
-  if (!payload?.userId) {
-    return res.status(401).json({
-      success: false,
-      message: "توکن ورود معتبر نیست.",
-    });
-  }
-
-  try {
-    const result = await db.query(
-      `SELECT id, name, email, role
-       FROM public.users
-       WHERE id = $1`,
-      [payload.userId]
-    );
-
-    if (!result.rows[0]) {
+  jwt.verify(token, JWT_SECRET, (error, decoded) => {
+    if (error) {
       return res.status(401).json({
         success: false,
-        message: "حساب کاربری پیدا نشد. دوباره وارد شوید.",
+        message: "Invalid or expired token",
       });
     }
 
-    const user = result.rows[0];
-    req.user = {
-      userId: String(user.id),
-      name: user.name,
-      email: user.email,
-      role: user.role,
-    };
-    return next();
-  } catch (error) {
-    console.error("Token user lookup failed:", error.message);
-    return res.status(500).json({
-      success: false,
-      message: "بررسی حساب کاربری انجام نشد.",
-    });
-  }
+    req.user = decoded;
+    next();
+  });
 }
 
-function requireAdmin(req, res, next) {
-  if (req.user?.role !== "admin") {
-    return res.status(403).json({
-      success: false,
-      message: "برای این عملیات دسترسی مدیر لازم است.",
-    });
-  }
-  return next();
-}
-
+// Root
 app.get("/", (req, res) => {
   res.send("Hemayat 13 API is running!");
 });
 
+// Health check
 app.get("/api/health", (req, res) => {
-  res.json({ success: true, message: "Backend is working!" });
+  res.json({
+    success: true,
+    message: "Backend is working!",
+  });
 });
 
+// Database connection test
 app.get("/api/db-test", async (req, res) => {
   try {
-    const result = await db.query("SELECT NOW() AS server_time");
-    return res.json({
+    const result = await queryDatabase(
+      "SELECT NOW() AS current_time"
+    );
+
+    res.json({
       success: true,
-      message: "Database connected!",
-      serverTime: result.rows[0].server_time,
+      message: "Database connected",
+      time: result.rows[0].current_time,
     });
   } catch (error) {
     console.error("Database test failed:", error.message);
-    return res.status(500).json({
+
+    res.status(500).json({
       success: false,
       message: "Database connection failed",
     });
   }
 });
 
-/* پیام‌های آزمایشی */
-app.post("/api/messages", async (req, res) => {
-  try {
-    const { message } = req.body;
-    if (typeof message !== "string" || !message.trim()) {
-      return res.status(400).json({ success: false, message: "Message is required" });
-    }
-
-    const result = await db.query(
-      `INSERT INTO public.test_messages (message)
-       VALUES ($1)
-       RETURNING id, message, created_at`,
-      [message.trim()]
-    );
-    return res.status(201).json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Save failed:", error.message);
-    return res.status(500).json({ success: false, message: "Could not save message" });
-  }
-});
-
-app.get("/api/messages", async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT id, message, created_at
-       FROM public.test_messages
-       ORDER BY id DESC`
-    );
-    return res.json({ success: true, data: result.rows });
-  } catch (error) {
-    console.error("Read failed:", error.message);
-    return res.status(500).json({ success: false, message: "Could not read messages" });
-  }
-});
-
-/* ثبت‌نام؛ نقش مدیر هرگز از ورودی کاربر دریافت نمی‌شود */
+// Register
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const name = String(req.body?.name || "").trim();
+    const email = String(req.body?.email || "")
+      .trim()
+      .toLowerCase();
+    const password = String(req.body?.password || "");
 
-    if (
-      typeof name !== "string" || !name.trim() || name.trim().length > 100 ||
-      typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
-      typeof password !== "string" || password.length < 8 || password.length > 128
-    ) {
+    if (!name || !email || !password) {
       return res.status(400).json({
         success: false,
-        message: "نام، ایمیل معتبر و رمز عبور ۸ تا ۱۲۸ کاراکتری وارد کنید.",
+        message: "Name, email and password are required",
       });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const passwordHash = await bcrypt.hash(password, 12);
-    const result = await db.query(
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email address",
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must contain at least 6 characters",
+      });
+    }
+
+    if (!JWT_SECRET) {
+      return res.status(500).json({
+        success: false,
+        message: "Server authentication is not configured",
+      });
+    }
+
+    const existing = await queryDatabase(
+      "SELECT id FROM public.users WHERE email = $1",
+      [email]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Email is already registered",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const result = await queryDatabase(
       `INSERT INTO public.users (name, email, password_hash)
        VALUES ($1, $2, $3)
        RETURNING id, name, email, role, created_at`,
-      [name.trim(), cleanEmail, passwordHash]
+      [name, email, passwordHash]
     );
 
     const user = result.rows[0];
+    const token = createToken(user);
+
     return res.status(201).json({
       success: true,
-      message: "حساب کاربری با موفقیت ساخته شد.",
-      token: signToken(user),
+      message: "Registration successful",
+      token,
       user,
     });
   } catch (error) {
-    if (error.code === "23505") {
-      return res.status(409).json({ success: false, message: "این ایمیل قبلاً ثبت شده است." });
-    }
     console.error("Registration failed:", error.message);
-    return res.status(500).json({ success: false, message: "ثبت‌نام انجام نشد." });
+
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "Email is already registered",
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Registration failed",
+    });
   }
 });
 
-/* ورود */
+// Login
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (
-      typeof email !== "string" || typeof password !== "string" ||
-      !email.trim() || !password || password.length > 128
-    ) {
-      return res.status(400).json({ success: false, message: "ایمیل و رمز عبور معتبر وارد کنید." });
+    const email = String(req.body?.email || "")
+      .trim()
+      .toLowerCase();
+    const password = String(req.body?.password || "");
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required",
+      });
     }
 
-    const result = await db.query(
-      `SELECT id, name, email, password_hash, role, created_at
+    if (!JWT_SECRET) {
+      return res.status(500).json({
+        success: false,
+        message: "Server authentication is not configured",
+      });
+    }
+
+    const result = await queryDatabase(
+      `SELECT id, name, email, password_hash, role
        FROM public.users
        WHERE email = $1`,
-      [email.trim().toLowerCase()]
+      [email]
     );
-    const user = result.rows[0];
 
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      return res.status(401).json({ success: false, message: "ایمیل یا رمز عبور اشتباه است." });
+    if (result.rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
+      });
     }
 
-    const publicUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      created_at: user.created_at,
+    const userRecord = result.rows[0];
+    const passwordMatches = await bcrypt.compare(
+      password,
+      userRecord.password_hash
+    );
+
+    if (!passwordMatches) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
+      });
+    }
+
+    const user = {
+      id: userRecord.id,
+      name: userRecord.name,
+      email: userRecord.email,
+      role: userRecord.role,
     };
+
+    const token = createToken(user);
+
     return res.json({
       success: true,
-      message: "ورود موفق بود.",
-      token: signToken(user),
-      user: publicUser,
+      message: "Login successful",
+      token,
+      user,
     });
   } catch (error) {
     console.error("Login failed:", error.message);
-    return res.status(500).json({ success: false, message: "ورود انجام نشد." });
+
+    return res.status(500).json({
+      success: false,
+      message: "Login failed",
+    });
   }
 });
 
-/* اطلاعات حساب واردشده */
-app.get("/api/auth/me", authenticateToken, (req, res) => {
-  return res.json({
-    success: true,
-    user: {
-      id: req.user.userId,
-      name: req.user.name,
-      email: req.user.email,
-      role: req.user.role,
-    },
-  });
-});
-
-/* ثبت درخواست حمایت؛ این مسیر پرداخت واقعی انجام نمی‌دهد */
-app.post("/api/donation-requests", authenticateToken, async (req, res) => {
+// Create a message
+app.post("/api/messages", async (req, res) => {
   try {
-    const amount = Number(req.body.amount);
+    const message = String(req.body?.message || "").trim();
 
-    if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 9999999999) {
-      return res.status(400).json({ success: false, message: "مبلغ واردشده معتبر نیست." });
+    if (!message) {
+      return res.status(400).json({
+        success: false,
+        message: "Message is required",
+      });
     }
 
-    const result = await db.query(
-      `INSERT INTO public.donation_requests (user_id, amount)
-       VALUES ($1, $2)
-       RETURNING id, user_id, amount, status, created_at`,
-      [req.user.userId, amount]
+    const result = await queryDatabase(
+      `INSERT INTO public.test_messages (message)
+       VALUES ($1)
+       RETURNING id, message, created_at`,
+      [message]
     );
 
     return res.status(201).json({
       success: true,
-      message: "درخواست با موفقیت ثبت شد.",
+      message: "Message saved",
       data: result.rows[0],
     });
   } catch (error) {
-    console.error("Donation request failed:", error.message);
-    return res.status(500).json({ success: false, message: "ثبت درخواست با خطا مواجه شد." });
+    console.error("Saving message failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not save message",
+    });
   }
 });
 
-/* کاربر فقط سوابق خودش را می‌بیند؛ مدیر می‌تواند همه درخواست‌ها را ببیند */
-app.get("/api/donation-requests", authenticateToken, async (req, res) => {
+// List messages
+app.get("/api/messages", async (req, res) => {
   try {
-    const result = req.user.role === "admin"
-      ? await db.query(
-        `SELECT id, user_id, donor_name, amount, message, status, created_at
-         FROM public.donation_requests
-         ORDER BY created_at DESC
-         LIMIT 100`
-      )
-      : await db.query(
-        `SELECT id, user_id, amount, status, created_at
-         FROM public.donation_requests
-         WHERE user_id = $1
-         ORDER BY created_at DESC
-         LIMIT 100`,
-        [req.user.userId]
-      );
+    const result = await queryDatabase(
+      `SELECT id, message, created_at
+       FROM public.test_messages
+       ORDER BY created_at DESC
+       LIMIT 100`
+    );
 
-    return res.json({ success: true, data: result.rows });
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
   } catch (error) {
-    console.error("Reading donation requests failed:", error.message);
-    return res.status(500).json({ success: false, message: "دریافت درخواست‌ها انجام نشد." });
+    console.error("Loading messages failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not load messages",
+    });
   }
 });
 
-/* تغییر وضعیت بررسی درخواست‌ها، فقط برای مدیر */
-app.patch(
-  "/api/donation-requests/:id/status",
+// Submit a donation request
+app.post(
+  "/api/donation-requests",
   authenticateToken,
-  requireAdmin,
   async (req, res) => {
     try {
-      const requestId = Number(req.params.id);
-      const { status } = req.body;
-      const allowedStatuses = new Set(["pending", "approved", "rejected"]);
+      const donorName = String(
+        req.body?.donorName || req.user.name || ""
+      ).trim();
 
-      if (!Number.isSafeInteger(requestId) || requestId <= 0 || !allowedStatuses.has(status)) {
+      const amount = Number(req.body?.amount);
+      const message = String(req.body?.message || "").trim();
+
+      if (!donorName || !Number.isFinite(amount) || amount <= 0) {
         return res.status(400).json({
           success: false,
-          message: "شناسه یا وضعیت درخواست معتبر نیست.",
+          message: "A donor name and a valid amount are required",
         });
       }
 
-      const result = await db.query(
-        `UPDATE public.donation_requests
-         SET status = $1
-         WHERE id = $2
-         RETURNING id, user_id, amount, status, created_at`,
-        [status, requestId]
+      const result = await queryDatabase(
+        `INSERT INTO public.donation_requests
+           (user_id, donor_name, amount, message)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, user_id, donor_name, amount,
+                   message, status, created_at`,
+        [req.user.id, donorName, amount, message]
       );
 
-      if (!result.rows[0]) {
-        return res.status(404).json({ success: false, message: "درخواست پیدا نشد." });
-      }
-
-      return res.json({
+      return res.status(201).json({
         success: true,
-        message: "وضعیت درخواست به‌روزرسانی شد. این تغییر به معنی ثبت پرداخت نیست.",
+        message: "Donation request submitted",
         data: result.rows[0],
       });
     } catch (error) {
-      console.error("Updating donation request failed:", error.message);
-      return res.status(500).json({ success: false, message: "تغییر وضعیت درخواست انجام نشد." });
+      console.error("Donation request failed:", error.message);
+
+      return res.status(500).json({
+        success: false,
+        message: "Could not submit donation request",
+      });
     }
   }
 );
 
-/* پاسخ JSON برای مسیرهای تعریف‌نشده */
+// List donation requests
+app.get("/api/donation-requests", async (req, res) => {
+  try {
+    const result = await queryDatabase(
+      `SELECT id, donor_name, amount, message, status, created_at
+       FROM public.donation_requests
+       ORDER BY created_at DESC
+       LIMIT 100`
+    );
+
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Loading donation requests failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not load donation requests",
+    });
+  }
+});
+
+// Not found
 app.use((req, res) => {
-  return res.status(404).json({
+  res.status(404).json({
     success: false,
-    message: `مسیر پیدا نشد: ${req.method} ${req.path}`,
+    message: "API route not found",
+    path: req.path,
   });
 });
 
-/* خطاهای JSON نامعتبر و خطاهای پیش‌بینی‌نشده */
+// General error handler
 app.use((error, req, res, next) => {
-  if (res.headersSent) return next(error);
-  console.error("Unhandled server error:", error.message);
-  const status = error instanceof SyntaxError && "body" in error ? 400 : 500;
-  return res.status(status).json({
+  console.error("Request failed:", error.message);
+
+  if (res.headersSent) {
+    return next(error);
+  }
+
+  res.status(500).json({
     success: false,
-    message: status === 400 ? "بدنهٔ درخواست JSON معتبر نیست." : "خطای داخلی سرور رخ داد.",
+    message: "Internal server error",
   });
 });
 
-const server = app.listen(port, "0.0.0.0", () => {
-  console.log(`Backend running on port ${port}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Hemayat 13 API running on port ${PORT}`);
+
+  if (!JWT_SECRET) {
+    console.error("JWT_SECRET is not configured");
+  }
+
+  if (!process.env.DATABASE_URL) {
+    console.error("DATABASE_URL is not configured");
+  }
 });
-
-async function shutdown(signal) {
-  console.log(`${signal} received. Closing server...`);
-  server.close(async () => {
-    await db.end();
-    process.exit(0);
-  });
-}
-
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
