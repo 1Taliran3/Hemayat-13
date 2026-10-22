@@ -166,6 +166,37 @@ app.get("/api/db-test", async (req, res) => {
   }
 });
 
+app.get("/api/auth/me", authenticateToken, async (req, res) => {
+  try {
+    const result = await queryDatabase(
+      `SELECT id, name, email, role, created_at
+       FROM public.users
+       WHERE id = $1
+       LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      user: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Loading current user failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not load current user",
+    });
+  }
+});
+
 // Register
 app.post("/api/auth/register", async (req, res) => {
   try {
